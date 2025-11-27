@@ -19,6 +19,7 @@ class CodeAnalyzer:
         '.css': 'css',
         '.md': 'markdown',
         '.json': 'json',
+        '.kt': 'kotlin',
     }
 
     def __init__(self, project_root: str):
