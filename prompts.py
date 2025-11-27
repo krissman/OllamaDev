@@ -1,10 +1,12 @@
 import json
-from typing import Dict, Any
+from typing import Dict, Any, List
 
 class PromptEngine:
     """
     Generates structured payloads for the Ollama API, including system prompts 
     and user queries, tailored to specific coding tasks and languages.
+    
+    UPDATED to include agent planning and execution prompts.
     """
 
     def __init__(self, ollama_url: str):
@@ -13,14 +15,15 @@ class PromptEngine:
         print(f"Prompt Engine initialized for base URL: {self.ollama_url}")
 
 
-    def _create_ollama_payload(self, system_prompt: str, user_prompt: str, model_name: str) -> Dict[str, Any]:
+    def _create_ollama_payload(self, system_prompt: str, user_prompt: str, model_name: str, enforce_json: bool = False) -> Dict[str, Any]:
         """
         Creates the standard JSON payload structure for the Ollama /api/generate endpoint.
         """
-        is_critical_task = "fix" in system_prompt.lower() or "review" in system_prompt.lower()
-        temperature = 0.2 if is_critical_task else 0.7
+        # Lower temperature for tasks requiring high precision (like planning/fixing JSON)
+        is_critical_task = enforce_json or "fix" in system_prompt.lower()
+        temperature = 0.1 if is_critical_task else 0.7
 
-        return {
+        payload = {
             "model": model_name,
             "prompt": user_prompt,
             "system": system_prompt,
@@ -30,6 +33,69 @@ class PromptEngine:
                 "num_ctx": 4096,
             },
         }
+        
+        if enforce_json:
+            # Use 'format': 'json' for Ollama to try to enforce JSON output
+            payload['format'] = 'json' 
+            
+        return payload
+
+    # --- NEW AGENT PLANNING PROMPT ---
+    def create_planning_prompt(self, goal: str, codebase_summary: str, model_name: str) -> Dict[str, Any]:
+        """
+        Generates a prompt to ask the LLM to create a multi-step action plan 
+        based on the project structure and the high-level goal.
+        """
+        
+        system_prompt = (
+            "You are a world-class Code Agent Planner. Your task is to analyze the user's goal "
+            "and the project file structure, then generate a precise, actionable plan. "
+            "Your output MUST be ONLY a single JSON array of steps, wrapped in markdown fences (`json`). "
+            "Each step MUST be an object with the properties: 'action', 'target', and 'description'.\n\n"
+            "Action Types:\n"
+            "1. 'GET_CONTEXT': Read the content of a file (e.g., a dependency or class definition) into the agent's memory. Target MUST be the file path.\n"
+            "2. 'GENERATE_CODE': Create a brand new file (e.g., a test file) using the current context. Target MUST be the new file path.\n"
+            "3. 'MODIFY_CODE': Alter the content of an existing file (e.g., add a new method). Target MUST be the file path.\n"
+            "4. 'REPORT_SUCCESS': The final step to indicate the task is complete. Target MUST be empty ('').\n\n"
+            "CRITICAL: The sequence must be logical. Start by getting necessary context before generating/modifying code."
+        )
+
+        user_prompt = (
+            f"GOAL: {goal}\n\n"
+            f"PROJECT FILE STRUCTURE:\n"
+            f"```text\n{codebase_summary}\n```\n\n"
+            f"Generate the JSON array of action steps to achieve the GOAL."
+        )
+        
+        return self._create_ollama_payload(system_prompt, user_prompt, model_name, enforce_json=True)
+
+    # --- NEW AGENT EXECUTION PROMPT ---
+    def create_execution_prompt(self, task_description: str, accumulated_context: str, target_file: str, project_language: str, model_name: str) -> Dict[str, Any]:
+        """
+        Generates a prompt for the LLM to execute a single code generation/modification step 
+        using all accumulated file context.
+        """
+        
+        system_prompt = (
+            f"You are a specialist {project_language.upper()} Developer. Your task is to perform a single, atomic coding operation. "
+            f"Analyze the accumulated code context and the specific task description. "
+            f"Your output MUST be ONLY the FULL, COMPLETE, AND CORRECT CONTENT for the target file '{target_file}'. "
+            f"DO NOT include commentary, surrounding text, or markdown fences. The output must be ready to write to the file system."
+        )
+
+        user_prompt = (
+            f"SPECIFIC TASK: {task_description}\n"
+            f"TARGET FILE: {target_file}\n\n"
+            f"ACCUMULATED CODE CONTEXT (Multiple Files):\n"
+            f"{accumulated_context}\n\n"
+            f"Generate ONLY the FULL content for the file '{target_file}'."
+        )
+        
+        # Use a non-JSON payload for raw code output
+        return self._create_ollama_payload(system_prompt, user_prompt, model_name, enforce_json=False)
+
+
+    # --- EXISTING PROMPTS (KEPT FOR REFERENCE/COMPLETENESS) ---
 
     def create_review_prompt(self, context: Dict[str, str], model_name: str) -> Dict[str, Any]:
         """
@@ -68,7 +134,6 @@ class PromptEngine:
         content = context['content']
         filepath = context['filepath']
 
-        # --- REVISED SYSTEM PROMPT TO DEMAND FULL CONTENT ONLY FOR MODIFY ---
         system_prompt = (
             f"You are an expert bug fixer for {language.upper()} codebases. Analyze the provided code and traceback. "
             "Your response MUST be ONLY a single JSON array that details the required file system actions. "
@@ -78,8 +143,6 @@ class PromptEngine:
             "  - 'filepath': The path to the file (relative to the project root). "
             
             "**CRITICAL RULE for 'modify' action:** The content MUST be the **FULL, COMPLETE, AND CORRECTED CONTENT of the target file**. "
-            "DO NOT include diff headers, hunk headers, or any structural elements like `--- a/` or `@@`."
-            
             "For 'create', content is the full new file content. For 'delete', content is empty."
         )
 
@@ -91,12 +154,13 @@ class PromptEngine:
             f"\n\nGenerate the JSON array of actions to fix this error."
         )
         
-        return self._create_ollama_payload(system_prompt, user_prompt, model_name)
+        return self._create_ollama_payload(system_prompt, user_prompt, model_name, enforce_json=True)
 
 
     def create_generate_prompt(self, context: Dict[str, str], user_request: str, model_name: str) -> Dict[str, Any]:
         """
-        Generates a prompt for new code generation (e.g., writing a new function).
+        Generates a prompt for new code generation (e.g., writing a new function) 
+        in the original single-file mode.
         """
         language = context['language']
         surrounding_code = context['content']

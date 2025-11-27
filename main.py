@@ -11,9 +11,10 @@ try:
     from prompts import PromptEngine
     from ollama_client import OllamaClient
     from editor import CodeEditor
+    from agent import CodeAgent # NEW: Import the CodeAgent
 except ImportError as e:
     print(f"Error importing required modules: {e}")
-    print("Ensure all files (config.py, utils.py, analyzer.py, prompts.py, ollama_client.py, editor.py) are in the same directory.")
+    print("Ensure all files (config.py, utils.py, analyzer.py, prompts.py, ollama_client.py, editor.py, agent.py) are in the same directory.")
     sys.exit(1)
 
 
@@ -28,6 +29,8 @@ def setup_components(project_root: str):
         engine = PromptEngine(OLLAMA_GENERATE_ENDPOINT)
         client = OllamaClient(OLLAMA_GENERATE_ENDPOINT)
         editor = CodeEditor(project_root)
+        
+        # NOTE: CodeAgent is initialized in run_agent as it needs all other components
         return analyzer, engine, client, editor
     except FileNotFoundError as e:
         print(f"Error setting up components: {e}")
@@ -35,9 +38,7 @@ def setup_components(project_root: str):
 
 def run_fix(args):
     """
-    Handles the 'fix' command. 
-    It requests a JSON array of actions (modify, create, delete) from the LLM 
-    and applies them via the CodeEditor.
+    Handles the 'fix' command (legacy single-file mode). 
     """
     print(f"\n[OllamaDev] Running fix for {args.filepath}...")
     
@@ -86,7 +87,6 @@ def run_review(args):
     analyzer, engine, client, _ = setup_components(args.root)
     
     # 1. Get context (prefer diff for review)
-    # The analyzer will fall back to 'full' content if the file is untracked
     context = analyzer.get_context(args.filepath, mode='diff')
     
     if context['content'].startswith("GIT_ERROR"):
@@ -115,13 +115,12 @@ def run_review(args):
     print("-----------------------------\n")
 
 def run_generate(args):
-    """Handles the 'generate' command."""
+    """Handles the 'generate' command (legacy single-file mode)."""
     print(f"\n[OllamaDev] Running code generation for {args.filepath}...")
     
     analyzer, engine, client, _ = setup_components(args.root)
     
     # 1. Get context (surrounding code for generation)
-    # We use 'full' mode, but only the surrounding content is relevant to the LLM
     context = analyzer.get_context(args.filepath, mode='full')
     
     # 2. Generate the generation prompt
@@ -146,9 +145,26 @@ def run_generate(args):
     print(f"Generated code is for reference and has NOT been written to {args.filepath}.")
 
 
+def run_agent(args):
+    """
+    Handles the 'agent' command: the new multi-file, multi-step orchestration.
+    """
+    print(f"\n[OllamaDev] Running Code Agent for goal: {args.goal}")
+    
+    analyzer, engine, client, editor = setup_components(args.root)
+    
+    agent = CodeAgent(analyzer, client, engine, editor)
+    
+    if not args.goal:
+        print("Agent command requires a specific goal (--goal). Aborting.")
+        return
+
+    agent.run_task(args.goal, args.model)
+
+
 def main():
     parser = argparse.ArgumentParser(
-        description="OllamaDev: Local Code Assistant powered by Ollama and Git context.",
+        description="OllamaDev: Local Code Assistant powered by Ollama and Git context. Now with Agent orchestration.",
         formatter_class=argparse.RawTextHelpFormatter
     )
     
@@ -168,7 +184,7 @@ def main():
 
     subparsers = parser.add_subparsers(dest='command', required=True)
 
-    # --- FIX Command ---
+    # --- FIX Command (Legacy) ---
     fix_parser = subparsers.add_parser('fix', help='Fixes a bug in a file(s) by generating structured actions (modify, create, delete).')
     fix_parser.add_argument('filepath', type=str, help='The primary file path (relative to root) to fix/provide context for.')
     fix_parser.add_argument(
@@ -179,12 +195,12 @@ def main():
     )
     fix_parser.set_defaults(func=run_fix)
 
-    # --- REVIEW Command ---
+    # --- REVIEW Command (Legacy) ---
     review_parser = subparsers.add_parser('review', help='Reviews a file or its uncommitted changes (diff).')
     review_parser.add_argument('filepath', type=str, help='The file path (relative to root) to review.')
     review_parser.set_defaults(func=run_review)
 
-    # --- GENERATE Command ---
+    # --- GENERATE Command (Legacy) ---
     generate_parser = subparsers.add_parser('generate', help='Generates new code (e.g., a function) based on existing context.')
     generate_parser.add_argument('filepath', type=str, help='The file path where the new code will be inserted (used for context).')
     generate_parser.add_argument(
@@ -194,6 +210,16 @@ def main():
         help='Optional: The specific request for the LLM. If omitted, input will be requested.'
     )
     generate_parser.set_defaults(func=run_generate)
+    
+    # --- AGENT Command (NEW Multi-File Mode) ---
+    agent_parser = subparsers.add_parser('agent', help='Runs the multi-step, multi-file code agent to complete complex goals.')
+    agent_parser.add_argument(
+        '--goal', 
+        type=str, 
+        required=True, 
+        help='The high-level goal for the agent (e.g., "Write unit tests for the src/UserManager class").'
+    )
+    agent_parser.set_defaults(func=run_agent)
 
 
     args = parser.parse_args()
