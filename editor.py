@@ -4,7 +4,8 @@ import subprocess
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 import re 
-import difflib # <-- NEW: Import difflib for reliable patch generation
+import difflib 
+import shutil # <-- NEW: Import shutil for recursive directory deletion
 
 # Assuming utils.py is available for shell command execution
 try:
@@ -14,7 +15,6 @@ except ImportError:
     def run_git_command(command_parts, cwd='.'):
         """Placeholder for actual run_git_command from utils.py"""
         print(f"[Placeholder] Executing: git {' '.join(command_parts)} in {cwd}")
-        # We will use direct subprocess for the critical git apply command below
         return f"Placeholder executed: {' '.join(command_parts)}"
 
 
@@ -23,8 +23,7 @@ class CodeEditor:
     Handles parsing LLM-generated JSON action lists and safely executing 
     file system changes (create, delete, modify via git apply).
     
-    NOTE: For 'modify', the LLM is expected to provide the full corrected file content, 
-    and the editor generates the diff internally using difflib.
+    UPDATED to include directory creation and deletion actions.
     """
 
     def __init__(self, project_root: str):
@@ -51,8 +50,6 @@ class CodeEditor:
             print(f"Raw Response: {json_string[:200]}...")
             return None
 
-    # --- REMOVED: _ensure_prefix_space method (now obsolete) ---
-
     def _read_file_content(self, filepath: Path) -> Optional[List[str]]:
         """Reads content of a file, returning lines for difflib."""
         try:
@@ -65,29 +62,67 @@ class CodeEditor:
             print(f"Error reading file {filepath}: {e}")
             return None
 
+    # --- NEW: Directory Creation ---
+    def _execute_create_dir(self, dirpath: Path) -> bool:
+        """
+        Creates a new directory (and its parents if necessary).
+        """
+        relative_path = dirpath.relative_to(self.project_root)
+        print(f"  -> Action: CREATE_DIR {relative_path}")
+        
+        if dirpath.exists() and dirpath.is_dir():
+            print(f"  -> WARNING: Directory {relative_path} already exists. Skipping creation.")
+            return True
+            
+        try:
+            # Create the directory, including any necessary parent directories
+            dirpath.mkdir(parents=True, exist_ok=True)
+            print(f"  -> SUCCESS: Directory created at {relative_path}.")
+            return True
+        except Exception as e:
+            print(f"  -> ERROR: Failed to create directory {relative_path}. Reason: {e}")
+            return False
+
+    # --- NEW: Directory Deletion ---
+    def _execute_delete_dir(self, dirpath: Path) -> bool:
+        """
+        Deletes a directory and all its contents recursively.
+        """
+        relative_path = dirpath.relative_to(self.project_root)
+        print(f"  -> Action: DELETE_DIR {relative_path}")
+
+        if not dirpath.exists():
+            print(f"  -> WARNING: Directory {relative_path} does not exist. Skipping deletion.")
+            return True
+        
+        if not dirpath.is_dir():
+            print(f"  -> ERROR: Path {relative_path} is a file, not a directory. Cannot delete with DELETE_DIR.")
+            return False
+            
+        try:
+            # Use shutil.rmtree for safe recursive deletion
+            shutil.rmtree(dirpath)
+            print(f"  -> SUCCESS: Directory deleted at {relative_path}.")
+            return True
+        except Exception as e:
+            print(f"  -> ERROR: Failed to delete directory {relative_path}. Reason: {e}")
+            return False
 
     def _execute_modify(self, filepath: Path, new_file_content: str) -> bool:
         """
         Reads the original file, generates a perfect diff using difflib 
         from the new content provided by the LLM, and applies the diff.
-        
-        Args:
-            filepath: The full path to the file being modified.
-            new_file_content: The full, corrected content provided by the LLM.
         """
         relative_path = filepath.relative_to(self.project_root)
         print(f"  -> Action: MODIFY {relative_path}")
         
-        # 1. Read the original file content
         original_lines = self._read_file_content(filepath)
         if original_lines is None:
             print(f"  -> ERROR: Original file not found or readable: {relative_path}. Cannot generate diff.")
             return False
         
-        # Prepare new content as lines
         new_lines = new_file_content.splitlines(True)
 
-        # 2. Generate a reliable unified diff using difflib
         diff_generator = difflib.unified_diff(
             original_lines, 
             new_lines, 
@@ -95,27 +130,22 @@ class CodeEditor:
             tofile=f'b/{relative_path}',
             n=3 # Standard context lines
         )
-        # Convert generator output to a single string
         diff_content = "".join(diff_generator)
         
-        # --- DIAGNOSTIC PRINT UPDATED ---
         print("\n  --- DEBUG: Diff Generated by difflib (Perfect Structure) ---")
         print(diff_content.strip() if diff_content else "[DIFFLIB GENERATED EMPTY PATCH]")
         print("  --------------------------------------------------\n")
         
         if not diff_content.strip():
             print(f"  -> WARNING: No changes detected for {relative_path}. Skipping patch application.")
-            return True # Successfully skipped application if no changes were needed
+            return True 
 
-        # 3. Temporarily save the generated diff to a file
         diff_tmp_path = self.project_root / f".{relative_path.name}.tmp.patch"
         
         try:
             with open(diff_tmp_path, 'w', encoding='utf-8') as f:
-                f.write(diff_content) # <--- Writes the perfect, difflib-generated diff
+                f.write(diff_content) 
             
-            # 4. Use `git apply`. We keep the --ignore-whitespace flag only as a safeguard 
-            # against minor trailing space differences, but the structure is now perfect.
             result = subprocess.run(
                 ['git', 'apply', '--unidiff-zero', '--ignore-whitespace', str(diff_tmp_path)],
                 cwd=str(self.project_root), 
@@ -137,7 +167,6 @@ class CodeEditor:
             return False
             
         finally:
-            # 5. Clean up the temporary diff file
             if diff_tmp_path.exists():
                 os.remove(diff_tmp_path)
 
@@ -153,7 +182,7 @@ class CodeEditor:
             return False
             
         try:
-            # Create parent directories if they don't exist
+            # Ensure parent directories exist (this handles nested paths automatically)
             filepath.parent.mkdir(parents=True, exist_ok=True)
             
             with open(filepath, 'w', encoding='utf-8') as f:
@@ -176,6 +205,10 @@ class CodeEditor:
             print(f"  -> WARNING: File {relative_path} does not exist. Skipping deletion.")
             return True # Consider successful if the file is already gone
             
+        if filepath.is_dir():
+            print(f"  -> ERROR: Path {relative_path} is a directory, not a file. Use DELETE_DIR.")
+            return False
+            
         try:
             os.remove(filepath)
             print(f"  -> SUCCESS: File deleted at {relative_path}.")
@@ -186,7 +219,7 @@ class CodeEditor:
 
     def apply_multi_action_fix(self, raw_json_response: str) -> bool:
         """
-        Main method to process and apply the LLM's structured multi-file actions.
+        Main method to process and apply the LLM's structured multi-file actions (Legacy Fix command).
         """
         
         actions = self._parse_actions(raw_json_response)
@@ -197,6 +230,7 @@ class CodeEditor:
         print(f"\n--- PROPOSED MULTI-FILE ACTIONS ({len(actions)} total) ---")
         
         # 1. Preview Actions
+        # Note: The 'fix' command doesn't use the new CREATE_DIR/DELETE_DIR actions yet
         for i, action in enumerate(actions, 1):
             act = action.get('action', 'unknown').lower()
             path = action.get('filepath', 'UNKNOWN_PATH')
@@ -229,7 +263,6 @@ class CodeEditor:
 
             success = False
             if act == 'modify':
-                # content is now the FULL file content, not a diff
                 success = self._execute_modify(full_path, content)
             elif act == 'create':
                 success = self._execute_create(full_path, content)

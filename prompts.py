@@ -5,8 +5,6 @@ class PromptEngine:
     """
     Generates structured payloads for the Ollama API, including system prompts 
     and user queries, tailored to specific coding tasks and languages.
-    
-    UPDATED to include agent planning and execution prompts.
     """
 
     def __init__(self, ollama_url: str):
@@ -19,7 +17,6 @@ class PromptEngine:
         """
         Creates the standard JSON payload structure for the Ollama /api/generate endpoint.
         """
-        # Lower temperature for tasks requiring high precision (like planning/fixing JSON)
         is_critical_task = enforce_json or "fix" in system_prompt.lower()
         temperature = 0.1 if is_critical_task else 0.7
 
@@ -40,7 +37,7 @@ class PromptEngine:
             
         return payload
 
-    # --- NEW AGENT PLANNING PROMPT ---
+    # --- AGENT PLANNING PROMPT (Updated with directory actions) ---
     def create_planning_prompt(self, goal: str, codebase_summary: str, model_name: str) -> Dict[str, Any]:
         """
         Generates a prompt to ask the LLM to create a multi-step action plan 
@@ -56,7 +53,9 @@ class PromptEngine:
             "1. 'GET_CONTEXT': Read the content of a file (e.g., a dependency or class definition) into the agent's memory. Target MUST be the file path.\n"
             "2. 'GENERATE_CODE': Create a brand new file (e.g., a test file) using the current context. Target MUST be the new file path.\n"
             "3. 'MODIFY_CODE': Alter the content of an existing file (e.g., add a new method). Target MUST be the file path.\n"
-            "4. 'REPORT_SUCCESS': The final step to indicate the task is complete. Target MUST be empty ('').\n\n"
+            "4. 'CREATE_DIR': Create a new directory or a nested directory structure. Target MUST be the directory path (e.g., 'src/api/v1').\n" # <--- NEW ACTION
+            "5. 'DELETE_DIR': Delete an existing directory and all its contents. Target MUST be the directory path.\n" # <--- NEW ACTION
+            "6. 'REPORT_SUCCESS': The final step to indicate the task is complete. Target MUST be empty ('').\n\n"
             "CRITICAL: The sequence must be logical. Start by getting necessary context before generating/modifying code."
         )
 
@@ -69,7 +68,7 @@ class PromptEngine:
         
         return self._create_ollama_payload(system_prompt, user_prompt, model_name, enforce_json=True)
 
-    # --- NEW AGENT EXECUTION PROMPT ---
+    # --- (Rest of the file remains unchanged) ---
     def create_execution_prompt(self, task_description: str, accumulated_context: str, target_file: str, project_language: str, model_name: str) -> Dict[str, Any]:
         """
         Generates a prompt for the LLM to execute a single code generation/modification step 
@@ -94,8 +93,6 @@ class PromptEngine:
         # Use a non-JSON payload for raw code output
         return self._create_ollama_payload(system_prompt, user_prompt, model_name, enforce_json=False)
 
-
-    # --- EXISTING PROMPTS (KEPT FOR REFERENCE/COMPLETENESS) ---
 
     def create_review_prompt(self, context: Dict[str, str], model_name: str) -> Dict[str, Any]:
         """

@@ -1,6 +1,6 @@
 import json
 import time
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from pathlib import Path
 
 # Import all core components
@@ -55,7 +55,9 @@ class CodeAgent:
             # The client cleans up markdown fences, so we expect raw JSON
             plan = json.loads(raw_json_plan)
             if not isinstance(plan, list):
+                 # This is the error path the user encountered. Improved feedback here.
                  print("PLANNING ERROR: LLM returned non-list JSON. Expected array of steps.")
+                 print(f"LLM Response Snippet:\n{raw_json_plan[:500]}...")
                  return None
             print(f"--- AGENT: PLAN GENERATED ({len(plan)} steps) ---")
             return plan
@@ -76,6 +78,7 @@ class CodeAgent:
         print(f"Description: {description}")
 
         success = False
+        full_path = self.project_root / target # Resolve path early
 
         if action == 'GET_CONTEXT':
             # ACTION 1: Read a file and store its content in the agent's state
@@ -84,7 +87,7 @@ class CodeAgent:
             
             if not context['content'].startswith("FILE_ERROR"):
                 self.state['context_files'][target] = context['content']
-                self.state['target_language'] = context['language'] # Update language
+                self.state['target_language'] = context['language']
                 success = True
                 print(f"  -> Context stored for {target}.")
             else:
@@ -94,14 +97,12 @@ class CodeAgent:
         elif action == 'GENERATE_CODE' or action == 'MODIFY_CODE':
             # ACTIONS 2/3: Generate or Modify file content based on accumulated context
             
-            # Combine all stored context files into a single context block
             full_context = self.analyzer.get_multiple_context(list(self.state['context_files'].keys()), self.state['context_files'])
             
             if not full_context:
                 print("  -> ERROR: Cannot execute code action without context. Aborting step.")
                 return False
 
-            # Use the Execution Prompt to get the content for the target file
             payload = self.engine.create_execution_prompt(
                 task_description=description,
                 accumulated_context=full_context,
@@ -117,26 +118,27 @@ class CodeAgent:
                 print(f"  -> LLM/Client Error: {raw_content}")
                 self.state['errors'].append(f"LLM failed to generate content for {target}")
                 return False
-
-            # LLM is strictly instructed to return only the file content
-            # The editor now handles the 'modify' vs 'create' logic based on file existence
             
-            full_path = self.project_root / target
-            
-            # The editor will check if the file exists to determine if it's a modify or create operation
+            # Dispatch to editor (it handles modify vs create based on existence)
             if full_path.exists():
                 success = self.editor._execute_modify(full_path, raw_content)
-                # Update agent state with the new content
-                if success:
-                    self.state['context_files'][target] = raw_content
             else:
                 success = self.editor._execute_create(full_path, raw_content)
-                # Add the new file to context state
-                if success:
-                    self.state['context_files'][target] = raw_content
-
+            
+            # Update agent state with the new/modified content
+            if success:
+                self.state['context_files'][target] = raw_content
+                
+        elif action == 'CREATE_DIR': # <-- NEW FOLDER ACTION
+            success = self.editor._execute_create_dir(full_path)
+            
+        elif action == 'DELETE_DIR': # <-- NEW FOLDER ACTION
+            # NOTE: We don't remove files from state context here, as files inside 
+            # the deleted directory might still be relevant for planning/reporting.
+            success = self.editor._execute_delete_dir(full_path)
+        
         elif action == 'REPORT_SUCCESS':
-            # ACTION 4: Final step, usually contains a summary description
+            # ACTION 6: Final step
             print(f"  -> Final action completed. Agent task finished.")
             success = True
         
