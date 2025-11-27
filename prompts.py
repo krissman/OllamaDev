@@ -37,7 +37,7 @@ class PromptEngine:
             
         return payload
 
-    # --- AGENT PLANNING PROMPT (Updated with directory actions) ---
+    # --- AGENT PLANNING PROMPT (Updated for stricter JSON array compliance) ---
     def create_planning_prompt(self, goal: str, codebase_summary: str, model_name: str) -> Dict[str, Any]:
         """
         Generates a prompt to ask the LLM to create a multi-step action plan 
@@ -47,14 +47,15 @@ class PromptEngine:
         system_prompt = (
             "You are a world-class Code Agent Planner. Your task is to analyze the user's goal "
             "and the project file structure, then generate a precise, actionable plan. "
-            "Your output MUST be ONLY a single JSON array of steps, wrapped in markdown fences (`json`). "
+            "Your response MUST be ONLY a single JSON array of steps, wrapped in markdown fences (`json`). "
+            "The output MUST start with '[' and end with ']'. NEVER output a JSON object ('{}') or any commentary." # <--- REINFORCED INSTRUCTION
             "Each step MUST be an object with the properties: 'action', 'target', and 'description'.\n\n"
             "Action Types:\n"
             "1. 'GET_CONTEXT': Read the content of a file (e.g., a dependency or class definition) into the agent's memory. Target MUST be the file path.\n"
             "2. 'GENERATE_CODE': Create a brand new file (e.g., a test file) using the current context. Target MUST be the new file path.\n"
             "3. 'MODIFY_CODE': Alter the content of an existing file (e.g., add a new method). Target MUST be the file path.\n"
-            "4. 'CREATE_DIR': Create a new directory or a nested directory structure. Target MUST be the directory path (e.g., 'src/api/v1').\n" # <--- NEW ACTION
-            "5. 'DELETE_DIR': Delete an existing directory and all its contents. Target MUST be the directory path.\n" # <--- NEW ACTION
+            "4. 'CREATE_DIR': Create a new directory or a nested directory structure. Target MUST be the directory path (e.g., 'src/api/v1').\n"
+            "5. 'DELETE_DIR': Delete an existing directory and all its contents. Target MUST be the directory path.\n"
             "6. 'REPORT_SUCCESS': The final step to indicate the task is complete. Target MUST be empty ('').\n\n"
             "CRITICAL: The sequence must be logical. Start by getting necessary context before generating/modifying code."
         )
@@ -68,7 +69,6 @@ class PromptEngine:
         
         return self._create_ollama_payload(system_prompt, user_prompt, model_name, enforce_json=True)
 
-    # --- (Rest of the file remains unchanged) ---
     def create_execution_prompt(self, task_description: str, accumulated_context: str, target_file: str, project_language: str, model_name: str) -> Dict[str, Any]:
         """
         Generates a prompt for the LLM to execute a single code generation/modification step 
